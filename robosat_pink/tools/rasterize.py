@@ -11,6 +11,7 @@ from PIL import Image
 from tqdm import tqdm
 
 import mercantile
+import fiona
 from rasterio.crs import CRS
 from rasterio.transform import from_bounds
 from rasterio.features import rasterize
@@ -47,23 +48,22 @@ def add_parser(subparser):
     parser.set_defaults(func=main)
 
 
-def geojson_to_mercator(feature):
+def geojson_to_mercator(feature, epsg=4326):
     """Convert GeoJSON Polygon feature coords to Mercator (i.e EPSG:3857).
        Inspired by: https://gist.github.com/dnomadb/5cbc116aacc352c7126e779c29ab7abe
     """
 
-    # FIXME: We assume that GeoJSON input coordinates can't be anything else than EPSG:4326
     if feature["geometry"]["type"] == "Polygon":
         xys = (zip(*ring) for ring in feature["geometry"]["coordinates"])
-        xys = (list(zip(*transform(CRS.from_epsg(4326), CRS.from_epsg(3857), *xy))) for xy in xys)
+        xys = (list(zip(*transform(CRS.from_epsg(int(epsg)), CRS.from_epsg(3857), *xy))) for xy in xys)
 
         yield {"coordinates": list(xys), "type": "Polygon"}
 
 
-def geojson_tile_burn(tile, features, tile_size, burn_value=1):
+def geojson_tile_burn(tile, features, tile_size, burn_value=1, epsg=4326):
     """Burn tile with GeoJSON features."""
 
-    shapes = ((geometry, burn_value) for feature in features for geometry in geojson_to_mercator(feature))
+    shapes = ((geometry, burn_value) for feature in features for geometry in geojson_to_mercator(feature, epsg))
 
     bounds = mercantile.xy_bounds(tile)
     transform = from_bounds(*bounds, tile_size, tile_size)
@@ -168,12 +168,12 @@ def main(args):
             sys.exit("With GeoJson input, zoom level and cover tiles z values have to be the same.")
 
         feature_map = collections.defaultdict(list)
-
+        epsg = 4326
         # Compute a spatial index like
         for geojson_file in args.geojson:
-            with open(geojson_file) as geojson:
-                feature_collection = json.load(geojson)
-                for i, feature in enumerate(tqdm(feature_collection["features"], ascii=True, unit="feature")):
+            with fiona.open(geojson_file) as feature_collection:
+                epsg = feature_collection.crs['init'][5:]
+                for i, feature in enumerate(tqdm(feature_collection, ascii=True, unit="feature")):
 
                     if feature["geometry"]["type"] == "GeometryCollection":
                         for geometry in feature["geometry"]["geometries"]:
@@ -184,7 +184,7 @@ def main(args):
         # Rasterize tiles
         for tile in tqdm(list(tiles_from_csv(args.cover)), ascii=True, unit="tile"):
             if tile in feature_map:
-                out = geojson_tile_burn(tile, feature_map[tile], tile_size, burn_value)
+                out = geojson_tile_burn(tile, feature_map[tile], tile_size, burn_value, epsg)
             else:
                 out = np.zeros(shape=(tile_size, tile_size), dtype=np.uint8)
 
